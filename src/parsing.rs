@@ -1,245 +1,10 @@
+use crate::cfg::*;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
-// Given CFG <N, T, R, S>, build LR(0) DFA
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
-pub enum Symbol {
-    Terminal(String),
-    NonTerminal(String),
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
-pub struct Production {
-    nonterminal: String,
-    expansion: Vec<Symbol>,
-}
-
-impl Production {
-    pub fn new(nonterminal: String, expansion: Vec<Symbol>) -> Self {
-        Self {
-            nonterminal,
-            expansion,
-        }
-    }
-
-    pub fn parse(line: &str, nonterminals: &HashSet<String>) -> Self {
-        let line = line.trim();
-        let parts = line.split_ascii_whitespace().collect::<Vec<&str>>();
-        match parts.as_slice() {
-            [nonterminal, "->", rest @ ..] => {
-                let expansion = rest
-                    .iter()
-                    .map(|x| {
-                        let s = x.to_string();
-                        if nonterminals.contains(&s) {
-                            Symbol::NonTerminal(s)
-                        } else {
-                            Symbol::Terminal(s)
-                        }
-                    })
-                    .collect();
-                Self {
-                    nonterminal: nonterminal.to_string(),
-                    expansion,
-                }
-            }
-            _ => {
-                eprintln!("Cannot parse production: {line:?}. Expected [non-terminal] -> ...");
-                std::process::exit(1);
-            }
-        }
-    }
-}
-
 #[derive(Debug)]
-pub struct Cfg {
-    start_symbol: String,
-    nonterminals: HashSet<String>,
-    terminals: HashSet<String>,
-    productions: Vec<Production>,
-}
-
-impl Cfg {
-    pub fn new(
-        start_symbol: String,
-        nonterminals: HashSet<String>,
-        terminals: HashSet<String>,
-        productions: Vec<Production>,
-    ) -> Self {
-        Self {
-            start_symbol,
-            nonterminals,
-            terminals,
-            productions,
-        }
-    }
-}
-
-struct AugmentedCfg {
-    start_symbol: String,
-    end_terminal: String,
-    nonterminals: HashSet<String>,
-    terminals: HashSet<String>,
-    productions: Vec<Production>,
-}
-
-struct CfgContext {
-    augmented_cfg: AugmentedCfg,
-    productions_by_nonterminal: HashMap<String, Vec<usize>>,
-    nullable: HashSet<String>,
-    first: HashMap<String, HashSet<String>>,
-    follow: HashMap<String, HashSet<String>>,
-}
-
-fn is_nullable(symbols: &[Symbol], nullable: &HashSet<String>) -> bool {
-    symbols.iter().all(|s| {
-        if let Symbol::NonTerminal(nt) = s {
-            nullable.contains(nt)
-        } else {
-            false
-        }
-    })
-}
-
-fn get_first(
-    symbols: &[Symbol],
-    first: &HashMap<String, HashSet<String>>,
-    nullable: &HashSet<String>,
-) -> Vec<String> {
-    let mut first_set = Vec::new();
-    for i in 0..symbols.len() {
-        if !is_nullable(&symbols[0..i], nullable) {
-            continue;
-        }
-        match &symbols[i] {
-            Symbol::Terminal(t) => {
-                first_set.push(t.clone());
-                break;
-            }
-            Symbol::NonTerminal(nt) => {
-                if let Some(nt_first) = first.get(nt) {
-                    first_set.extend(nt_first.iter().cloned());
-                }
-            }
-        }
-    }
-    first_set
-}
-
-impl CfgContext {
-    fn augment_grammar(cfg: &Cfg) -> AugmentedCfg {
-        let append_until_unique = |mut s: String| -> String {
-            while cfg.nonterminals.contains(&s) || cfg.terminals.contains(&s) {
-                // Append underscores until unique
-                s += "'";
-            }
-            s
-        };
-
-        let new_start_symbol = append_until_unique(String::from("S'"));
-        let end_terminal = append_until_unique(String::from("$"));
-
-        let mut new_nonterminals = cfg.nonterminals.clone();
-        new_nonterminals.insert(new_start_symbol.clone());
-
-        let mut new_productions = cfg.productions.clone();
-        new_productions.push(Production::new(
-            new_start_symbol.clone(),
-            vec![
-                Symbol::NonTerminal(cfg.start_symbol.clone()),
-                Symbol::Terminal(end_terminal.clone()),
-            ],
-        ));
-
-        AugmentedCfg {
-            start_symbol: new_start_symbol,
-            end_terminal,
-            nonterminals: new_nonterminals,
-            terminals: cfg.terminals.clone(),
-            productions: new_productions,
-        }
-    }
-
-    fn from(cfg: &Cfg) -> Self {
-        let cfg = CfgContext::augment_grammar(cfg);
-        let mut productions_by_nonterminal: HashMap<_, Vec<usize>> = HashMap::new();
-        // first(A) = {a in T : A =>* a... }
-        let mut first = HashMap::new();
-        // nullable(A) = A =>* epsilon
-        let mut nullable = HashSet::new();
-        // follow(A) = {a in T : S =>* ...Aa... }
-        let mut follow: HashMap<String, HashSet<String>> = HashMap::new();
-
-        for (idx, p) in cfg.productions.iter().enumerate() {
-            productions_by_nonterminal
-                .entry(p.nonterminal.to_owned())
-                .or_default()
-                .push(idx);
-        }
-
-        loop {
-            // Tracks whether any of first, nullable, follow sets changed
-            let mut changed = false;
-
-            for p in cfg.productions.iter() {
-                // Nullable
-                if is_nullable(&p.expansion, &nullable) {
-                    changed |= nullable.insert(p.nonterminal.clone());
-                }
-
-                // First
-                for t in get_first(&p.expansion, &first, &nullable) {
-                    changed |= first
-                        .entry(p.nonterminal.clone())
-                        .or_default()
-                        .insert(t.clone());
-                }
-
-                // Follow
-                for i in 0..p.expansion.len() {
-                    if let Symbol::NonTerminal(cur_symbol) = &p.expansion[i] {
-                        let tail = &p.expansion[i + 1..];
-                        for t in get_first(tail, &first, &nullable) {
-                            changed |= follow
-                                .entry(cur_symbol.clone())
-                                .or_default()
-                                .insert(t.clone());
-                        }
-                        if is_nullable(tail, &nullable)
-                            && let Some(follow_set) = follow.get(&p.nonterminal).cloned()
-                        {
-                            for t in follow_set {
-                                changed |= follow
-                                    .entry(cur_symbol.clone())
-                                    .or_default()
-                                    .insert(t.clone());
-                            }
-                        }
-                    }
-                }
-
-                // Update last symbol's follow seperately
-                if let Some(Symbol::NonTerminal(last_nt)) = p.expansion.last() {
-                    // For A -> ...B, follow(A) is a subset of follow(B)
-                    for t in follow.get(&p.nonterminal).cloned().into_iter().flatten() {
-                        changed |= follow.entry(last_nt.clone()).or_default().insert(t);
-                    }
-                }
-            }
-
-            if !changed {
-                break;
-            }
-        }
-
-        Self {
-            augmented_cfg: cfg,
-            productions_by_nonterminal,
-            first,
-            nullable,
-            follow,
-        }
-    }
+pub struct ParseTree {
+    value: Symbol,
+    children: Vec<ParseTree>,
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -274,7 +39,7 @@ pub struct Lr1Parser {
 
 impl Lr1Parser {
     pub fn new(cfg: &Cfg) -> Self {
-        let cfgctx = CfgContext::from(&cfg);
+        let cfgctx = CfgContext::from(cfg);
         let dfa = Lr1Parser::build_dfa(&cfgctx);
         let parser = Self { cfgctx, dfa };
         parser.print_dfa();
@@ -330,24 +95,20 @@ impl Lr1Parser {
             for (symbol, closure) in closure_by_tansition {
                 let next_state = DfaState { items: closure };
 
-                if states.contains(&next_state) {
-                    continue;
-                }
+                let next_state_id = if let Some((id, _)) =
+                    states.iter().enumerate().find(|(_, x)| *x == &next_state)
+                {
+                    id
+                } else {
+                    states.push(next_state);
+                    let next_state_id = states.len() - 1;
+                    queue.push_back(next_state_id);
+                    next_state_id
+                };
 
-                states.push(next_state);
-                let next_state_id = states.len() - 1;
-                queue.push_back(next_state_id);
                 transitions.insert((state_id, symbol.clone()), next_state_id);
             }
         }
-
-        // println!("# states = {:?}", states.len());
-        // println!("states = {:#?}", states);
-        // println!();
-
-        // println!("# transitions = {:?}", transitions.len());
-        // println!("transitions = {:#?}", transitions);
-        // println!();
 
         Dfa {
             states,
@@ -515,117 +276,87 @@ impl Lr1Parser {
             });
         }
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+    fn reduce(&self, state_id: usize, lookahead: &str) -> Option<&Production> {
+        let state = &self.dfa.states[state_id];
+        state
+            .items
+            .iter()
+            .find(|item| {
+                item.get_symbol_after_dot(&self.cfgctx) == None
+                    && item.lookahead.contains(lookahead)
+            })
+            .map(|item| &self.cfgctx.augmented_cfg.productions[item.production_id])
+    }
 
-    #[test]
-    fn new_cfg_context() {
-        let start_symbol = "S".to_string();
-        let nonterminals = vec!["S", "E", "A", "B", "C"]
+    pub fn parse(&self, input: &[&str]) -> ParseTree {
+        let mut stack: Vec<(ParseTree, usize)> = Vec::from([]);
+        let mut right_derivation: Vec<&Production> = Vec::new();
+
+        let get_next_state_id = |stack: &[(_, usize)], symbol: &Symbol| -> usize {
+            let last_state_id = if let Some((_, state_id)) = stack.last() {
+                *state_id
+            } else {
+                0
+            };
+            *self
+                .dfa
+                .transitions
+                .get(&(last_state_id, symbol.clone()))
+                .unwrap_or_else(|| {
+                    dbg!(self.dfa.transitions.get(&(last_state_id, symbol.clone())));
+                    panic!(
+                        "Input is not in language of grammar: no transition on state {} and symbol {:?}",
+                        last_state_id, symbol
+                    )
+                })
+        };
+
+        for t in input
+            .iter()
+            .chain([self.cfgctx.augmented_cfg.end_terminal.as_str()].iter())
+        {
+            let input_symbol = Symbol::Terminal(t.to_string());
+
+            while let Some((_, state_id)) = stack.last()
+                && let Some(reduce) = self.reduce(*state_id, t)
+            {
+                let reduce_symbol = Symbol::NonTerminal(reduce.nonterminal.clone());
+
+                let stack_len = stack.len();
+                let drain_start = stack_len - reduce.expansion.len();
+                let new_state_id = get_next_state_id(&stack[..drain_start], &reduce_symbol);
+                let symbols_to_reduce = stack.drain(drain_start..);
+
+                let reduce_node = ParseTree {
+                    value: reduce_symbol,
+                    children: symbols_to_reduce.map(|(node, _)| node).collect(),
+                };
+
+                stack.push((reduce_node, new_state_id));
+                right_derivation.push(reduce)
+            }
+
+            let next_state_id = get_next_state_id(&stack, &input_symbol);
+
+            stack.push((
+                ParseTree {
+                    value: Symbol::Terminal(t.to_string()),
+                    children: vec![],
+                },
+                next_state_id,
+            ));
+        }
+
+        println!("Rightmost derivation:");
+        for reduce in right_derivation.iter().rev() {
+            println!("Apply {} -> {:?}", reduce.nonterminal, reduce.expansion);
+        }
+
+        stack
             .into_iter()
-            .map(String::from)
-            .collect();
-        let terminals = vec!["(", ")", "a", "b", "c"]
-            .into_iter()
-            .map(String::from)
-            .collect();
-        let productions = vec![
-            Production::new(
-                "S".to_string(),
-                vec![
-                    Symbol::Terminal("(".to_string()),
-                    Symbol::NonTerminal("E".to_string()),
-                    Symbol::Terminal(")".to_string()),
-                ],
-            ),
-            Production::new(
-                "E".to_string(),
-                vec![
-                    Symbol::NonTerminal("A".to_string()),
-                    Symbol::NonTerminal("B".to_string()),
-                    Symbol::NonTerminal("C".to_string()),
-                ],
-            ),
-            Production::new("A".to_string(), vec![Symbol::Terminal("a".to_string())]),
-            Production::new("A".to_string(), vec![]),
-            Production::new("B".to_string(), vec![Symbol::Terminal("b".to_string())]),
-            Production::new("B".to_string(), vec![]),
-            Production::new("C".to_string(), vec![Symbol::Terminal("c".to_string())]),
-            Production::new("C".to_string(), vec![]),
-        ];
-        let cfg = Cfg::new(start_symbol, nonterminals, terminals, productions);
-        let ctx = CfgContext::from(&cfg);
-
-        assert_eq!(ctx.augmented_cfg.start_symbol, "S'");
-
-        // Nullable
-        assert_eq!(
-            ctx.nullable,
-            HashSet::from([
-                "A".to_string(),
-                "B".to_string(),
-                "C".to_string(),
-                "E".to_string()
-            ])
-        );
-        // First
-        assert_eq!(
-            ctx.first.get(&"S'".to_string()),
-            Some(&HashSet::from(["(".to_string()]))
-        );
-        assert_eq!(
-            ctx.first.get(&"S".to_string()),
-            Some(&HashSet::from(["(".to_string()]))
-        );
-        assert_eq!(
-            ctx.first.get(&"E".to_string()),
-            Some(&HashSet::from([
-                "a".to_string(),
-                "b".to_string(),
-                "c".to_string()
-            ]))
-        );
-        assert_eq!(
-            ctx.first.get(&"A".to_string()),
-            Some(&HashSet::from(["a".to_string()]))
-        );
-        assert_eq!(
-            ctx.first.get(&"B".to_string()),
-            Some(&HashSet::from(["b".to_string()]))
-        );
-        assert_eq!(
-            ctx.first.get(&"C".to_string()),
-            Some(&HashSet::from(["c".to_string()]))
-        );
-        // Follow
-        assert_eq!(ctx.follow.get(&"S'".to_string()), None,);
-        assert_eq!(
-            ctx.follow.get(&"S".to_string()),
-            Some(&HashSet::from(["$".to_string()])),
-        );
-
-        assert_eq!(
-            ctx.follow.get(&"E".to_string()),
-            Some(&HashSet::from([")".to_string()]))
-        );
-        assert_eq!(
-            ctx.follow.get(&"A".to_string()),
-            Some(&HashSet::from([
-                "b".to_string(),
-                "c".to_string(),
-                ")".to_string()
-            ]))
-        );
-        assert_eq!(
-            ctx.follow.get(&"B".to_string()),
-            Some(&HashSet::from(["c".to_string(), ")".to_string()]))
-        );
-        assert_eq!(
-            ctx.follow.get(&"C".to_string()),
-            Some(&HashSet::from([")".to_string()]))
-        );
+            .next()
+            .map(|(tree, _)| tree)
+            .expect("Stack should be non-empty after parsing is complete")
     }
 }
