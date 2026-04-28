@@ -9,21 +9,6 @@ mod parsing;
 use cfg::{Cfg, Production};
 use parsing::Lr1Parser;
 
-/*
-The goal is to write SLR(1), LALR(1), LR(1) parsers.
-Given a context free grammar, determine if the grammar is LR(1) and parse token sequence.
-
-.cfg file should look like
-
-# non-terminals
-
-# terminals
-
-# number of production rules
-
-# Start non-terminal
-*/
-
 fn read_n_symbols(reader: &mut BufReader<File>, num_lines: usize) -> HashSet<String> {
     let mut symbols = HashSet::new();
     for _ in 0..num_lines {
@@ -88,10 +73,10 @@ fn main() -> io::Result<()> {
         panic!("Duplicate terminal and non-terminal: {duplicate_symbols:?}");
     }
 
+    // TODO
     // Verify terminal and non-terminal symbols don't overlap
     // Report unused symbols in production rules
     // Report rules that can never be applied?
-
     // Verify all symbols in production rules are defined as either terminal or non-terminal
     // Verify lhs of production rules are non-terminals
 
