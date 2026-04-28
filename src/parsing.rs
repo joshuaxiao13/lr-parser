@@ -1,7 +1,7 @@
 use crate::cfg::*;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct ParseTree {
     value: Symbol,
     children: Vec<ParseTree>,
@@ -150,9 +150,9 @@ impl Lr1Parser {
                         .into_iter()
                         .flatten()
                     {
-                        let reduce_key = &(*reduce_idx, 0);
+                        let reduce_key = (*reduce_idx, 0);
                         let new_lookaheads = if let Some(existing_lookaheads) =
-                            lookahead_by_production_id_and_dot.get(reduce_key)
+                            lookahead_by_production_id_and_dot.get(&reduce_key)
                         {
                             new_lookahead_candidates
                                 .difference(existing_lookaheads)
@@ -167,11 +167,11 @@ impl Lr1Parser {
                         }
 
                         lookahead_by_production_id_and_dot
-                            .entry((*reduce_idx, 0))
+                            .entry(reduce_key)
                             .or_default()
                             .extend(new_lookaheads);
 
-                        deque.push_back((*reduce_idx, 0));
+                        deque.push_back(reduce_key);
                     }
                 }
                 Some(Symbol::Terminal(_)) | None => ( /* noop */),
@@ -290,7 +290,7 @@ impl Lr1Parser {
     }
 
     pub fn parse(&self, input: &[&str]) -> ParseTree {
-        let mut stack: Vec<(ParseTree, usize)> = Vec::from([]);
+        let mut stack: Vec<(ParseTree, usize)> = Vec::new();
         let mut right_derivation: Vec<&Production> = Vec::new();
 
         let get_next_state_id = |stack: &[(_, usize)], symbol: &Symbol| -> usize {
@@ -358,5 +358,230 @@ impl Lr1Parser {
             .next()
             .map(|(tree, _)| tree)
             .expect("Stack should be non-empty after parsing is complete")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn get_test_cfg() -> Cfg {
+        /*
+         S -> Identifier
+         S -> MethodCall
+         Identifier -> id
+         Identifier -> S . id
+         MethodCall -> Identifier ( )
+        */
+        let start_symbol = "S".to_string();
+        let nonterminals = HashSet::from([
+            "S".to_string(),
+            "Identifier".to_string(),
+            "MethodCall".to_string(),
+        ]);
+        let terminals = HashSet::from([
+            "id".to_string(),
+            ".".to_string(),
+            "(".to_string(),
+            ")".to_string(),
+        ]);
+        let productions = vec![
+            Production::new(
+                "S".to_string(),
+                vec![Symbol::NonTerminal("Identifier".to_string())],
+            ),
+            Production::new(
+                "S".to_string(),
+                vec![Symbol::NonTerminal("MethodCall".to_string())],
+            ),
+            Production::new(
+                "Identifier".to_string(),
+                vec![Symbol::Terminal("id".to_string())],
+            ),
+            Production::new(
+                "Identifier".to_string(),
+                vec![
+                    Symbol::NonTerminal("S".to_string()),
+                    Symbol::Terminal(".".to_string()),
+                    Symbol::Terminal("id".to_string()),
+                ],
+            ),
+            Production::new(
+                "MethodCall".to_string(),
+                vec![
+                    Symbol::NonTerminal("Identifier".to_string()),
+                    Symbol::Terminal("(".to_string()),
+                    Symbol::Terminal(")".to_string()),
+                ],
+            ),
+        ];
+        Cfg::new(start_symbol, nonterminals, terminals, productions)
+    }
+
+    #[test]
+    #[should_panic]
+    fn input_not_in_language() {
+        let cfg = get_test_cfg();
+        let parser = Lr1Parser::new(&cfg);
+        let input = ["id", "(", ")", "(", ")"];
+        parser.parse(&input);
+    }
+
+    #[test]
+    fn test_parse_simple_identifier() {
+        let cfg = get_test_cfg();
+        let parser = Lr1Parser::new(&cfg);
+        let input = ["id"];
+        let tree = parser.parse(&input);
+        assert_eq!(
+            tree,
+            ParseTree {
+                value: Symbol::NonTerminal("S".to_string()),
+                children: vec![ParseTree {
+                    value: Symbol::NonTerminal("Identifier".to_string()),
+                    children: vec![ParseTree {
+                        value: Symbol::Terminal("id".to_string()),
+                        children: vec![]
+                    }]
+                }]
+            }
+        )
+    }
+
+    #[test]
+    fn test_parse_qualified_identifier() {
+        let cfg = get_test_cfg();
+        let parser = Lr1Parser::new(&cfg);
+        let input = ["id", ".", "id"];
+        let tree = parser.parse(&input);
+        assert_eq!(
+            tree,
+            ParseTree {
+                value: Symbol::NonTerminal("S".to_string()),
+                children: vec![ParseTree {
+                    value: Symbol::NonTerminal("Identifier".to_string()),
+                    children: vec![
+                        ParseTree {
+                            value: Symbol::NonTerminal("S".to_string()),
+                            children: vec![ParseTree {
+                                value: Symbol::NonTerminal("Identifier".to_string()),
+                                children: vec![ParseTree {
+                                    value: Symbol::Terminal("id".to_string()),
+                                    children: vec![]
+                                }]
+                            }]
+                        },
+                        ParseTree {
+                            value: Symbol::Terminal(".".to_string()),
+                            children: vec![]
+                        },
+                        ParseTree {
+                            value: Symbol::Terminal("id".to_string()),
+                            children: vec![]
+                        }
+                    ]
+                }]
+            }
+        )
+    }
+
+    #[test]
+    fn test_parse_simple_method_call() {
+        let cfg = get_test_cfg();
+        let parser = Lr1Parser::new(&cfg);
+        let input = ["id", "(", ")"];
+        let tree = parser.parse(&input);
+        assert_eq!(
+            tree,
+            ParseTree {
+                value: Symbol::NonTerminal("S".to_string()),
+                children: vec![ParseTree {
+                    value: Symbol::NonTerminal("MethodCall".to_string()),
+                    children: vec![
+                        ParseTree {
+                            value: Symbol::NonTerminal("Identifier".to_string()),
+                            children: vec![ParseTree {
+                                value: Symbol::Terminal("id".to_string()),
+                                children: vec![]
+                            }]
+                        },
+                        ParseTree {
+                            value: Symbol::Terminal("(".to_string()),
+                            children: vec![]
+                        },
+                        ParseTree {
+                            value: Symbol::Terminal(")".to_string()),
+                            children: vec![]
+                        },
+                    ]
+                }]
+            }
+        )
+    }
+
+    #[test]
+    fn test_parse_method_call() {
+        let cfg = get_test_cfg();
+        let parser = Lr1Parser::new(&cfg);
+        let input = ["id", "(", ")", ".", "id", "(", ")"];
+        let tree = parser.parse(&input);
+
+        // parse tree for "id ( )"
+        let simple_method_call = ParseTree {
+            value: Symbol::NonTerminal("S".to_string()),
+            children: vec![ParseTree {
+                value: Symbol::NonTerminal("MethodCall".to_string()),
+                children: vec![
+                    ParseTree {
+                        value: Symbol::NonTerminal("Identifier".to_string()),
+                        children: vec![ParseTree {
+                            value: Symbol::Terminal("id".to_string()),
+                            children: vec![],
+                        }],
+                    },
+                    ParseTree {
+                        value: Symbol::Terminal("(".to_string()),
+                        children: vec![],
+                    },
+                    ParseTree {
+                        value: Symbol::Terminal(")".to_string()),
+                        children: vec![],
+                    },
+                ],
+            }],
+        };
+
+        assert_eq!(
+            tree,
+            ParseTree {
+                value: Symbol::NonTerminal("S".to_string()),
+                children: vec![ParseTree {
+                    value: Symbol::NonTerminal("MethodCall".to_string()),
+                    children: vec![
+                        ParseTree {
+                            value: Symbol::NonTerminal("Identifier".to_string()),
+                            children: vec![
+                                simple_method_call,
+                                ParseTree {
+                                    value: Symbol::Terminal(".".to_string()),
+                                    children: vec![]
+                                },
+                                ParseTree {
+                                    value: Symbol::Terminal("id".to_string()),
+                                    children: vec![]
+                                }
+                            ]
+                        },
+                        ParseTree {
+                            value: Symbol::Terminal("(".to_string()),
+                            children: vec![]
+                        },
+                        ParseTree {
+                            value: Symbol::Terminal(")".to_string()),
+                            children: vec![]
+                        },
+                    ]
+                }]
+            }
+        )
     }
 }
